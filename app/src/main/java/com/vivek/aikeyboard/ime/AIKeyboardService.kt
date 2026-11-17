@@ -1,78 +1,206 @@
 package com.vivek.aikeyboard.ime
 
-import android.content.Intent
 import android.inputmethodservice.InputMethodService
-import android.view.*
-import android.view.inputmethod.EditorInfo
-import android.widget.*
 import android.graphics.Color
-import android.graphics.Typeface
-import com.vivek.aikeyboard.core.Bridge
+import android.graphics.drawable.GradientDrawable
+import android.view.Gravity
+import android.view.inputmethod.EditorInfo
+import android.widget.LinearLayout
+import android.widget.TextView
 
 class AIKeyboardService : InputMethodService() {
-    private var style = "natural and conversational"
+    private lateinit var suggestionRow: LinearLayout
     private lateinit var status: TextView
-    override fun onCreateInputView(): View {
-        val outer = LinearLayout(this).apply { orientation=LinearLayout.VERTICAL; setPadding(8,8,8,8); setBackgroundColor(Color.rgb(24,31,45)) }
-        val top = LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER_VERTICAL }
-        val brand = TextView(this).apply { text="VIVEK AI"; textSize=14f; setTextColor(Color.WHITE); typeface=Typeface.DEFAULT_BOLD; setPadding(8,8,12,8) }
-        top.addView(brand)
-        status = TextView(this).apply { text="Choose an AI action"; textSize=11f; setTextColor(0xFFB9C4D5.toInt()) }
-        top.addView(status, LinearLayout.LayoutParams(0, -2, 1f))
-        top.addView(action("Insert result") { insertResult() })
-        outer.addView(top)
-        val styles = LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL }
-        listOf("Natural","Flirty","Funny","Mature","Confident").forEach { label -> styles.addView(action(label) { style=when(label){"Flirty"->"playful and lightly flirty";"Funny"->"witty and funny";"Mature"->"mature, thoughtful and respectful";"Confident"->"confident but not arrogant";else->"natural and conversational"}; status.text="$label style selected" }) }
-        outer.addView(ScrollView(this).apply { isHorizontalScrollBarEnabled=false; addView(styles) }, LinearLayout.LayoutParams(-1, -2))
-        val actions = LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL }
-        actions.addView(action("Smart Reply") { request("reply") }, weight())
-        actions.addView(action("Pickup Line") { request("pickup") }, weight())
-        actions.addView(action("Translate") { request("translate") }, weight())
-        outer.addView(actions)
-        val keys = listOf("qwertyuiop","asdfghjkl","zxcvbnm")
-        keys.forEach { line ->
-            val row=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER }
-            line.forEach { ch -> row.addView(key(ch.toString()), LinearLayout.LayoutParams(0, dp(42), 1f).apply { setMargins(2,2,2,2) }) }
-            outer.addView(row)
+    private var pickupMode = false
+    private var shifted = false
+
+    private val pickupLines = listOf(
+        "I was going to think of a clever opener, but your smile distracted me 😊",
+        "Quick question: are you always this interesting, or did I catch you on a good day? 😉",
+        "I had a good opening line ready… then I saw your profile and forgot it 😅",
+        "You seem like someone worth getting to know. How's your day going? ✨",
+        "Your vibe caught my attention. What's one thing I should know about you? 🌻",
+        "What's something that can make you smile instantly? Asking for research 😄"
+    )
+    private val dictionary = listOf(
+        "the","there","then","they","this","that","thanks","thank","you","your","you're",
+        "hello","hey","have","how","what","when","where","with","would","could","should",
+        "good","great","going","got","just","nice","really","sounds","sure","okay","maybe"
+    )
+
+    override fun onCreateInputView(): android.view.View {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(4), dp(4), dp(4), dp(3))
+            background = shape(0xFF202631.toInt(), 10)
         }
-        val bottom=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL }
-        bottom.addView(action("?123") { currentInputConnection?.commitText("?",1) })
-        bottom.addView(action("Space") { currentInputConnection?.commitText(" ",1) }, weight())
-        bottom.addView(action("⌫") { currentInputConnection?.deleteSurroundingText(1,0) })
-        bottom.addView(action("↵") { currentInputConnection?.commitText("\n",1) })
-        outer.addView(bottom)
-        return outer
-    }
-    private fun action(label:String, click:()->Unit): Button = Button(this).apply { text=label; textSize=10f; isAllCaps=false; setPadding(4,2,4,2); setOnClickListener { click() } }
-    private fun key(value:String): Button = Button(this).apply { text=value; textSize=17f; isAllCaps=false; setPadding(0,0,0,0); setOnClickListener { currentInputConnection?.commitText(value,1) } }
-    private fun weight() = LinearLayout.LayoutParams(0,-2,1f).apply { setMargins(2,0,2,0) }
-    private fun dp(v:Int)= (v*resources.displayMetrics.density).toInt()
-    private fun request(kind:String) {
-        val ic=currentInputConnection
-        val selected=ic?.getSelectedText(0)?.toString()?.trim().orEmpty()
-        val before=ic?.getTextBeforeCursor(700,0)?.toString()?.trim().orEmpty()
-        val context=if(selected.isNotBlank()) selected else before
-        val prompt=when(kind){
-            "pickup" -> "Write 5 original, natural pickup-line options for this conversation. Style: $style. Keep them respectful, concise and not cheesy. Conversation context: ${context.ifBlank { "No context; create versatile openers." }}"
-            "translate" -> "Translate the following text. Detect its language and translate to ${if(context.any { it.code > 127 }) "English" else "Hindi"}. Return only the translation: ${context.ifBlank { "Please ask me to select or type text to translate." }}"
-            else -> "Suggest 5 distinct replies to this conversation. Style: $style. Make them natural, concise and context-aware. Return numbered options only. Conversation context: ${context.ifBlank { "No message context is available. Give me a short friendly conversation opener." }}"
+        suggestionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
-        Bridge.savePrompt(this,prompt)
-        status.text="Opening ChatGPT…"
-        val launch=packageManager.getLaunchIntentForPackage("com.openai.chatgpt")
-        if(launch==null){ status.text="Install ChatGPT first"; return }
-        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        startActivity(launch)
+        root.addView(suggestionRow, LinearLayout.LayoutParams(-1, dp(40)))
+
+        val tools = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        tools.addView(tool("Pickup line ✨", true) {
+            pickupMode = true
+            showChoices(pickupLines.take(3))
+            status.text = "Tap a line to insert it"
+        }, weight(1f))
+        tools.addView(tool("Reply", false) {
+            pickupMode = true
+            showChoices(listOf("Hey! 😊", "That sounds interesting! Tell me more 🙂", "Haha, I like your sense of humour 😄"))
+            status.text = "Choose a quick reply"
+        }, weight(.65f))
+        tools.addView(tool("Emoji", false) {
+            pickupMode = true
+            showChoices(listOf("😊", "😉", "😂", "❤️", "✨", "🥰"))
+            status.text = "Tap an emoji to insert"
+        }, weight(.55f))
+        root.addView(tools, LinearLayout.LayoutParams(-1, dp(34)))
+
+        status = TextView(this).apply {
+            text = "Word suggestions"
+            textSize = 9f
+            gravity = Gravity.CENTER
+            setTextColor(0xFF9BA8B8.toInt())
+        }
+        root.addView(status, LinearLayout.LayoutParams(-1, dp(14)))
+
+        addLetters(root, "qwertyuiop")
+        addLetters(root, "asdfghjkl", 14)
+        addThirdRow(root)
+        addBottomRow(root)
+        refreshSuggestions()
+        return root
     }
-    private fun insertResult() {
-        val result=Bridge.result(this)
-        if(result.isNullOrBlank()) { status.text="No result yet. Complete the ChatGPT step first."; return }
-        currentInputConnection?.commitText(result,1)
-        Bridge.clearResult(this)
-        status.text="Draft inserted — review before sending"
+
+    private fun addLetters(root: LinearLayout, letters: String, inset: Int = 0) {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(inset), dp(2), dp(inset), dp(2))
+        }
+        letters.forEach { c ->
+            row.addView(key(if (shifted) c.uppercaseChar().toString() else c.toString(), 0xFF414B5A.toInt(), 19f) {
+                currentInputConnection?.commitText(if (shifted) c.uppercaseChar().toString() else c.toString(), 1)
+                shifted = false
+                pickupMode = false
+                refreshSuggestions()
+            }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { setMargins(dp(2), 0, dp(2), 0) })
+        }
+        root.addView(row, LinearLayout.LayoutParams(-1, dp(46)))
     }
+
+    private fun addThirdRow(root: LinearLayout) {
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        row.addView(key("⇧", 0xFF596779.toInt(), 18f) {
+            shifted = !shifted
+            status.text = if (shifted) "Shift enabled" else "Shift disabled"
+        }, fixed(42, 42))
+        "zxcvbnm".forEach { c ->
+            row.addView(key(if (shifted) c.uppercaseChar().toString() else c.toString(), 0xFF414B5A.toInt(), 19f) {
+                currentInputConnection?.commitText(if (shifted) c.uppercaseChar().toString() else c.toString(), 1)
+                shifted = false
+                pickupMode = false
+                refreshSuggestions()
+            }, LinearLayout.LayoutParams(0, dp(42), 1f).apply { setMargins(dp(2), 0, dp(2), 0) })
+        }
+        row.addView(key("⌫", 0xFF596779.toInt(), 19f) {
+            currentInputConnection?.deleteSurroundingText(1, 0)
+            refreshSuggestions()
+        }, fixed(48, 42))
+        root.addView(row, LinearLayout.LayoutParams(-1, dp(46)))
+    }
+
+    private fun addBottomRow(root: LinearLayout) {
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        row.addView(key("?123", 0xFF596779.toInt(), 12f) { showChoices(listOf("1","2","3","4","5","6","7","8","9","0")) }, fixed(48, 43))
+        row.addView(key(",", 0xFF414B5A.toInt(), 17f) { currentInputConnection?.commitText(",", 1) }, fixed(34, 43))
+        row.addView(key("😊", 0xFF414B5A.toInt(), 17f) { currentInputConnection?.commitText("😊", 1) }, fixed(38, 43))
+        row.addView(key("English (US)", 0xFF414B5A.toInt(), 11f) {
+            currentInputConnection?.commitText(" ", 1)
+            refreshSuggestions()
+        }, LinearLayout.LayoutParams(0, dp(43), 1f).apply { setMargins(dp(2), 0, dp(2), 0) })
+        row.addView(key(".", 0xFF414B5A.toInt(), 17f) { currentInputConnection?.commitText(".", 1) }, fixed(34, 43))
+        row.addView(key(enterLabel(), 0xFF3978D4.toInt(), 18f) {
+            val ic = currentInputConnection ?: return@key
+            val action = currentInputEditorInfo?.imeOptions?.and(EditorInfo.IME_MASK_ACTION)
+            if (action != null && action != EditorInfo.IME_ACTION_NONE && action != EditorInfo.IME_ACTION_UNSPECIFIED)
+                ic.performEditorAction(action) else ic.commitText("\n", 1)
+        }, fixed(46, 43))
+        root.addView(row, LinearLayout.LayoutParams(-1, dp(47)))
+    }
+
+    private fun enterLabel() = when (currentInputEditorInfo?.imeOptions?.and(EditorInfo.IME_MASK_ACTION)) {
+        EditorInfo.IME_ACTION_GO -> "Go"
+        EditorInfo.IME_ACTION_SEARCH -> "⌕"
+        EditorInfo.IME_ACTION_SEND -> "➤"
+        EditorInfo.IME_ACTION_NEXT -> "→"
+        EditorInfo.IME_ACTION_DONE -> "✓"
+        else -> "↵"
+    }
+
+    private fun refreshSuggestions() {
+        if (!::suggestionRow.isInitialized || pickupMode) return
+        val before = currentInputConnection?.getTextBeforeCursor(40, 0)?.toString().orEmpty()
+        val prefix = before.takeLastWhile { it.isLetter() }
+        val matches = if (prefix.isBlank()) listOf("😊", "👍", "✨")
+            else dictionary.filter { it.startsWith(prefix, true) && !it.equals(prefix, true) }.take(3)
+                .ifEmpty { listOf("😊", "👍", "✨") }
+        showChoices(matches)
+    }
+
+    private fun showChoices(items: List<String>) {
+        if (!::suggestionRow.isInitialized) return
+        suggestionRow.removeAllViews()
+        items.take(3).forEach { item ->
+            val v = TextView(this).apply {
+                text = item
+                textSize = if (item.length > 25) 10f else 14f
+                maxLines = 2
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                setPadding(dp(3), 0, dp(3), 0)
+                setOnClickListener {
+                    currentInputConnection?.commitText(item, 1)
+                    pickupMode = false
+                    status.text = "Inserted — review before sending"
+                    refreshSuggestions()
+                }
+            }
+            suggestionRow.addView(v, LinearLayout.LayoutParams(0, -1, 1f))
+        }
+    }
+
+    private fun key(label: String, color: Int, size: Float, click: () -> Unit) =
+        TextView(this).apply {
+            text = label
+            textSize = size
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            maxLines = 1
+            isClickable = true
+            background = shape(color, 6)
+            setOnClickListener { click() }
+        }
+
+    private fun tool(label: String, primary: Boolean, click: () -> Unit) =
+        key(label, if (primary) 0xFF285A9E.toInt() else 0xFF354050.toInt(), 11f, click)
+
+    private fun shape(color: Int, radius: Int) = GradientDrawable().apply {
+        setColor(color)
+        cornerRadius = dp(radius).toFloat()
+    }
+    private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
+    private fun fixed(w: Int, h: Int) = LinearLayout.LayoutParams(dp(w), dp(h)).apply { setMargins(dp(2), 0, dp(2), 0) }
+    private fun weight(w: Float) = LinearLayout.LayoutParams(0, -1, w).apply { setMargins(dp(2), 0, dp(2), 0) }
+
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
-        super.onStartInputView(info,restarting)
-        if(::status.isInitialized) status.text=if(Bridge.result(this)!=null) "Reply ready — tap Insert result" else "Choose an AI action"
+        super.onStartInputView(info, restarting)
+        pickupMode = false
+        if (::status.isInitialized) {
+            status.text = "Type to see words • Pickup line for drafts"
+            refreshSuggestions()
+        }
     }
 }
